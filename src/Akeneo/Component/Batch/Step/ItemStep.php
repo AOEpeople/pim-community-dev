@@ -10,6 +10,9 @@ use Akeneo\Component\Batch\Item\ItemReaderInterface;
 use Akeneo\Component\Batch\Item\ItemWriterInterface;
 use Akeneo\Component\Batch\Job\JobRepositoryInterface;
 use Akeneo\Component\Batch\Model\StepExecution;
+use Akeneo\Component\StorageUtils\Detacher\BulkObjectDetacherInterface;
+use Pim\Component\Catalog\Model\AssociationInterface;
+use Pim\Component\Catalog\Model\ProductInterface;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 
 /**
@@ -36,14 +39,18 @@ class ItemStep extends AbstractStep
     /** @var StepExecution */
     protected $stepExecution = null;
 
+    /** @var  BulkObjectDetacherInterface */
+    protected $objectDetacher;
+
     /**
-     * @param string                   $name
-     * @param EventDispatcherInterface $eventDispatcher
-     * @param JobRepositoryInterface   $jobRepository
-     * @param ItemReaderInterface      $reader
-     * @param ItemProcessorInterface   $processor
-     * @param ItemWriterInterface      $writer
-     * @param integer                  $batchSize
+     * @param string                      $name
+     * @param EventDispatcherInterface    $eventDispatcher
+     * @param JobRepositoryInterface      $jobRepository
+     * @param ItemReaderInterface         $reader
+     * @param ItemProcessorInterface      $processor
+     * @param ItemWriterInterface         $writer
+     * @param integer                     $batchSize
+     * @param BulkObjectDetacherInterface $objectDetacher
      */
     public function __construct(
         $name,
@@ -52,7 +59,8 @@ class ItemStep extends AbstractStep
         ItemReaderInterface $reader,
         ItemProcessorInterface $processor,
         ItemWriterInterface $writer,
-        $batchSize = 100
+        $batchSize = 100,
+        BulkObjectDetacherInterface $objectDetacher = null
     ) {
         $this->name = $name;
         $this->jobRepository = $jobRepository;
@@ -61,6 +69,7 @@ class ItemStep extends AbstractStep
         $this->processor = $processor;
         $this->writer = $writer;
         $this->batchSize = $batchSize;
+        $this->objectDetacher = $objectDetacher;
     }
 
     /**
@@ -98,12 +107,14 @@ class ItemStep extends AbstractStep
      */
     public function doExecute(StepExecution $stepExecution)
     {
+        gc_enable();
         $itemsToWrite = [];
         $writeCount = 0;
 
         $this->initializeStepElements($stepExecution);
 
         $stopExecution = false;
+        $readItems=[];
         while (!$stopExecution) {
             try {
                 $readItem = $this->reader->read();
@@ -118,6 +129,8 @@ class ItemStep extends AbstractStep
             }
 
             $processedItem = $this->process($readItem);
+            $readItems[] = $readItem;
+            unset($readItem);
             if (null !== $processedItem) {
                 $itemsToWrite[] = $processedItem;
                 $writeCount++;
@@ -125,6 +138,8 @@ class ItemStep extends AbstractStep
                     $this->write($itemsToWrite);
                     $itemsToWrite = [];
                     $this->getJobRepository()->updateStepExecution($stepExecution);
+                    $this->detachItems($readItems);
+                    $readItems = [];
                 }
             }
         }
@@ -226,5 +241,49 @@ class ItemStep extends AbstractStep
             'processor' => $this->processor,
             'writer'    => $this->writer
         ];
+    }
+
+    /**
+     * Detach $items and run gc_collect_cycles
+     *
+     * @param array $items Item to detach (if its an object)
+     * @return void
+     */
+    public function detachItems(array $items)
+    {
+        if (null == $this->objectDetacher) {
+            return;
+        }
+
+        if (empty($items)) {
+            return;
+        }
+
+        foreach ($items as $item) {
+            if ($item instanceof ProductInterface) {
+                $this->detachProductAssociations($item);
+            }
+        }
+
+        $this->objectDetacher->detachAll($items);
+        gc_collect_cycles();
+    }
+
+    /**
+     * Detach the associations of an abstract product.
+     *
+     * @param ProductInterface $product
+     * @return void
+     */
+    protected function detachProductAssociations(ProductInterface $product)
+    {
+        /** @var AssociationInterface $association */
+        $associations = $product->getAssociations();
+        foreach ($associations as $association) {
+            $this->objectDetacher->detachAll(
+                $association->getProducts()
+                    ->toArray()
+            );
+        }
     }
 }
