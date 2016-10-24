@@ -217,6 +217,7 @@ services:
             - '@pim_connector.processor.normalization.product'
             - '@pim_connector.writer.file.csv_product'
             - 10
+            - '@akeneo_storage_utils.doctrine.object_detacher'
 
     pim_connector.step.csv_category.export:
         class: '%pim_connector.step.item_step.class%'
